@@ -1,0 +1,56 @@
+version: "3.9"
+
+services:
+  beebot:
+    image: beebot:latest
+    container_name: beebot
+    restart: unless-stopped
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    env_file:
+      - .env
+
+    volumes:
+      # Knowledge base persists between restarts and is written by sync container
+      - beebot_data:/app/data
+      # Service account JSON — keep outside image, mount read-only
+      - ./config/service-account.json:/app/config/service-account.json:ro
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "beebot.py"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Separate sync container — runs once and exits
+  # Trigger manually in Portainer or via cron on host:
+  #   docker compose run --rm beebot-sync
+  beebot-sync:
+    image: beebot:latest
+    container_name: beebot-sync
+    restart: "no"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    env_file:
+      - .env
+
+    volumes:
+      - beebot_data:/app/data
+      - ./config/service-account.json:/app/config/service-account.json:ro
+
+    command: ["python", "sync/sync_docs.py"]
+
+volumes:
+  beebot_data:
+    driver: local

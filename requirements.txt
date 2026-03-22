@@ -1,0 +1,8 @@
+anthropic==0.86.0
+slack-bolt==1.27.0
+slack-sdk==3.41.0
+google-auth==2.49.1
+google-api-python-client==2.193.0
+google-auth-httplib2==0.3.0
+httpx==0.28.1
+requests==2.32.5
