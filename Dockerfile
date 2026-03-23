@@ -13,9 +13,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code and version
+# Copy application code, tests, and version
 COPY bot/     ./bot/
 COPY sync/    ./sync/
+COPY tests/   ./tests/
 COPY VERSION  .
 
 # Data and config directories (mounted as volumes in production)

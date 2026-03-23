@@ -39,23 +39,46 @@ MANIFEST_PATH     = os.environ.get("MANIFEST_PATH", "/app/data/sync_manifest.jso
 SYSTEM_PROMPT_PATH = "/app/data/system_prompt.txt"
 SCOPES            = ["https://www.googleapis.com/auth/drive.readonly"]
 
-WORDPRESS_BASE_URL      = os.environ.get("WORDPRESS_BASE_URL", "")
-WORDPRESS_SYNC_CATEGORY = os.environ.get("WORDPRESS_SYNC_CATEGORY", "beebot-slackbot")
+# Load runtime_config.json from the data volume as a fallback for operational config.
+# When sync runs as a subprocess of beebot.py, these keys are already injected into
+# the environment via _build_sync_env(). When running standalone (cron, make sync),
+# this ensures the same config is available without duplicating it in .env.
+_RUNTIME_CONFIG_PATH = "/app/data/runtime_config.json"
+_runtime_cfg: dict = {}
+try:
+    _rc_text = Path(_RUNTIME_CONFIG_PATH).read_text(encoding="utf-8")
+    _runtime_cfg = json.loads(_rc_text)
+except FileNotFoundError:
+    pass
+except Exception as _e:
+    log.warning("Could not load runtime_config.json: %s", _e)
 
-EVENTBRITE_PRIVATE_TOKEN = os.environ.get("EVENTBRITE_PRIVATE_TOKEN", "")
-EVENTBRITE_ORG_ID        = os.environ.get("EVENTBRITE_ORG_ID", "")
 
-# WordPress slug blocklist — override with comma-separated env var, or use defaults
+def _cfg(key: str, default="") -> str:
+    """Read operational config: env (injected by beebot.py) takes precedence, then runtime_config.json, then default."""
+    return os.environ.get(key) or str(_runtime_cfg.get(key, "")) or default
+
+
+WORDPRESS_BASE_URL      = _cfg("WORDPRESS_BASE_URL")
+WORDPRESS_SYNC_CATEGORY = _cfg("WORDPRESS_SYNC_CATEGORY", "beebot-slackbot")
+
+EVENTBRITE_PRIVATE_TOKEN  = _cfg("EVENTBRITE_PRIVATE_TOKEN")
+EVENTBRITE_ORG_ID         = _cfg("EVENTBRITE_ORG_ID")
+EVENTBRITE_LOOKAHEAD_DAYS = int(_cfg("EVENTBRITE_LOOKAHEAD_DAYS", "90"))
+
+# WordPress slug blocklist — override with comma-separated env/runtime value, or use defaults
 _DEFAULT_WP_BLOCKLIST = {
     "billing", "redirect-handler", "redirect-handler-local", "new-member-signup",
     "membership-registration", "membership-profile", "password-reset", "wiki", "home",
 }
-_wp_blocklist_env = os.environ.get("WORDPRESS_SLUG_BLOCKLIST", "")
-WORDPRESS_SLUG_BLOCKLIST = (
-    {s.strip() for s in _wp_blocklist_env.split(",") if s.strip()}
-    if _wp_blocklist_env
-    else _DEFAULT_WP_BLOCKLIST
-)
+_wp_blocklist_raw = _cfg("WORDPRESS_SLUG_BLOCKLIST")
+# runtime_config.json stores it as a list; env var is comma-separated
+if isinstance(_runtime_cfg.get("WORDPRESS_SLUG_BLOCKLIST"), list) and not os.environ.get("WORDPRESS_SLUG_BLOCKLIST"):
+    WORDPRESS_SLUG_BLOCKLIST = set(_runtime_cfg["WORDPRESS_SLUG_BLOCKLIST"])
+elif _wp_blocklist_raw:
+    WORDPRESS_SLUG_BLOCKLIST = {s.strip() for s in _wp_blocklist_raw.split(",") if s.strip()}
+else:
+    WORDPRESS_SLUG_BLOCKLIST = _DEFAULT_WP_BLOCKLIST
 
 # ── Google Drive Auth ─────────────────────────────────────────────────────────
 
@@ -111,8 +134,8 @@ def export_doc_as_text(service, doc_id: str, doc_name: str) -> str | None:
         )
         content = request.execute()
         if isinstance(content, bytes):
-            return content.decode("utf-8", errors="replace")
-        return content
+            return content.decode("utf-8", errors="replace").replace('\ufeff', '')
+        return content.replace('\ufeff', '') if isinstance(content, str) else content
     except HttpError as e:
         log.error("Failed to export doc '%s' (%s): %s", doc_name, doc_id, e)
         return None
@@ -152,11 +175,15 @@ class _HTMLStripper(HTMLParser):
             href = attrs_dict.get("href", "")
             if href and href.startswith("http"):
                 self._current_href = href
+        elif tag in ("td", "th"):
+            self._chunks.append(" ")
 
     def handle_endtag(self, tag):
         if tag == "a" and self._current_href:
             self._chunks.append(f" ({self._current_href})")
             self._current_href = None
+        elif tag == "tr":
+            self._chunks.append("\n")
 
     def handle_data(self, data):
         self._chunks.append(data)
@@ -258,16 +285,45 @@ def fetch_wordpress_pages(base_url: str, category: str) -> list[dict]:
 
 # ── Eventbrite Sync ───────────────────────────────────────────────────────────
 
-def fetch_eventbrite_events(private_token: str, org_id: str) -> list[dict]:
+def _log_available_eventbrite_orgs(private_token: str):
+    """On org-not-found error, fetch and log the org IDs this token can actually access."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            "https://www.eventbriteapi.com/v3/users/me/organizations/",
+            headers={"Authorization": f"Bearer {private_token}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        orgs = data.get("organizations", [])
+        if orgs:
+            for org in orgs:
+                log.info("  Available Eventbrite org: id=%s  name=%s", org.get("id"), org.get("name"))
+            log.info("Set EVENTBRITE_ORG_ID to one of the IDs above via /beebot-config set")
+        else:
+            log.warning("No Eventbrite organizations found for this token")
+    except Exception as e:
+        log.warning("Could not fetch Eventbrite org list: %s", e)
+
+
+def fetch_eventbrite_events(
+    private_token: str, org_id: str, lookahead_days: int = EVENTBRITE_LOOKAHEAD_DAYS
+) -> list[dict] | None:
     """
-    Fetch upcoming published events from Eventbrite for the given org.
-    Returns list of {name, content} dicts compatible with the knowledge base format.
+    Fetch upcoming published events from Eventbrite for the given org within lookahead_days.
+    Recurring events (same title) are collapsed into a single entry listing upcoming dates.
+    Returns list of {name, content} dicts, or None if the API call failed
+    (distinguishes API error from legitimately empty event list).
     """
     import urllib.request, urllib.parse, urllib.error
-    from datetime import datetime as dt
+    from collections import defaultdict
+    from datetime import datetime as dt, timedelta, timezone
 
+    now = dt.now(timezone.utc)
+    cutoff = now + timedelta(days=lookahead_days)
     base = "https://www.eventbriteapi.com/v3"
-    results = []
+    _raw_events = []
+    had_error = False
     params = urllib.parse.urlencode({
         "status": "live",
         "time_filter": "current_future",
@@ -283,12 +339,21 @@ def fetch_eventbrite_events(private_token: str, org_id: str) -> list[dict]:
             with urllib.request.urlopen(req, timeout=15) as r:
                 data = json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            log.error("Eventbrite API error %d: %s", e.code, e.reason)
+            if e.code == 404:
+                log.error("Eventbrite API error 404: organization '%s' not found — check EVENTBRITE_ORG_ID", org_id)
+                _log_available_eventbrite_orgs(private_token)
+            elif e.code == 401:
+                log.error("Eventbrite API error 401: invalid or expired token — check EVENTBRITE_PRIVATE_TOKEN")
+            else:
+                log.error("Eventbrite API error %d: %s", e.code, e.reason)
+            had_error = True
             break
         except Exception as e:
             log.error("Eventbrite fetch error: %s", e)
+            had_error = True
             break
 
+        past_cutoff = False
         for event in data.get("events", []):
             title = event["name"]["text"]
             summary = event.get("summary", "")
@@ -297,6 +362,11 @@ def fetch_eventbrite_events(private_token: str, org_id: str) -> list[dict]:
             start_local = event.get("start", {}).get("local", "")
             try:
                 start_dt = dt.fromisoformat(start_local)
+                # Skip events beyond the lookahead window; events are ordered
+                # start_asc so we can stop paginating once we pass the cutoff.
+                if start_dt.replace(tzinfo=timezone.utc) > cutoff:
+                    past_cutoff = True
+                    break
                 date_str = start_dt.strftime("%A, %B %-d %Y at %-I:%M %p")
             except Exception:
                 date_str = start_local
@@ -307,21 +377,16 @@ def fetch_eventbrite_events(private_token: str, org_id: str) -> list[dict]:
                            addr.get("city", ""), addr.get("region", "")]
             venue_str = ", ".join(p for p in venue_parts if p) or "TBD"
 
-            lines = [
-                f"Title: {title}",
-                f"Date: {date_str}",
-                f"Location: {venue_str}",
-            ]
-            if summary:
-                lines.append(f"Description: {summary}")
-            if event_url:
-                lines.append(f"URL: {event_url}")
-
-            results.append({
-                "name": f"eventbrite/{title}",
-                "content": "\n".join(lines),
+            _raw_events.append({
+                "title": title,
+                "date_str": date_str,
+                "venue_str": venue_str,
+                "summary": summary,
+                "event_url": event_url,
             })
-            log.info("  ✓ Eventbrite: %s (%s)", title, date_str)
+
+        if past_cutoff:
+            break
 
         pagination = data.get("pagination", {})
         if pagination.get("has_more_items"):
@@ -333,6 +398,40 @@ def fetch_eventbrite_events(private_token: str, org_id: str) -> list[dict]:
             url = f"{base}/organizations/{org_id}/events/?{next_params}"
         else:
             url = None
+
+    if had_error:
+        return None
+
+    # Group by title — recurring events (same name) become one entry
+    groups: dict[str, list] = defaultdict(list)
+    for ev in _raw_events:
+        groups[ev["title"]].append(ev)
+
+    results = []
+    for title, occurrences in groups.items():
+        ev0 = occurrences[0]
+        if len(occurrences) == 1:
+            lines = [f"Title: {title}", f"Date: {ev0['date_str']}", f"Location: {ev0['venue_str']}"]
+            if ev0["summary"]:
+                lines.append(f"Description: {ev0['summary']}")
+            if ev0["event_url"]:
+                lines.append(f"URL: {ev0['event_url']}")
+            log.info("  ✓ Eventbrite: %s (%s)", title, ev0["date_str"])
+        else:
+            # List every date within the lookahead window so the bot can answer
+            # "when is the next open house after X?" for any date in the window.
+            date_lines = [f"  - {ev['date_str']}" for ev in occurrences]
+            lines = (
+                [f"Title: {title}", f"Recurring event — {len(occurrences)} upcoming occurrences:"]
+                + date_lines
+                + [f"Location: {ev0['venue_str']}"]
+            )
+            if ev0["summary"]:
+                lines.append(f"Description: {ev0['summary']}")
+            if ev0["event_url"]:
+                lines.append(f"URL: {ev0['event_url']}")
+            log.info("  ✓ Eventbrite: %s (%d occurrences, next: %s)", title, len(occurrences), ev0["date_str"])
+        results.append({"name": f"eventbrite/{title}", "content": "\n".join(lines)})
 
     return results
 
@@ -351,9 +450,15 @@ def load_manifest() -> dict:
 
 
 def save_manifest(docs: list):
-    """Save current sync manifest."""
+    """Save current sync manifest (atomic write — safe across permission boundaries)."""
     manifest = {d["id"]: {"name": d["name"], "modifiedTime": d["modifiedTime"]} for d in docs}
-    Path(MANIFEST_PATH).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    path = Path(MANIFEST_PATH)
+    tmp_path = path.parent / (path.name + ".tmp")
+    try:
+        tmp_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        os.replace(tmp_path, path)
+    except Exception as e:
+        log.error("Failed to save manifest: %s", e)
 
 
 def diff_manifest(old: dict, new_docs: list) -> dict:
@@ -380,16 +485,27 @@ def run_sync():
 
     log.info("Found %d docs total", len(all_docs))
 
-    # Separate config docs (starting with '_') from knowledge base docs
-    config_docs = [d for d in all_docs if d["name"].startswith("_")]
-    kb_docs     = [d for d in all_docs if not d["name"].startswith("_")]
+    # Separate config docs (filename starts with '_') from knowledge base docs.
+    # Check the basename so docs in subfolders like tools/_ignored also work.
+    config_docs = [d for d in all_docs if d["name"].split("/")[-1].startswith("_")]
+    kb_docs     = [d for d in all_docs if not d["name"].split("/")[-1].startswith("_")]
 
     # Process config docs first
+    system_prompt_written = False
     for doc in config_docs:
         log.info("Config doc: %s", doc["name"])
         text = export_doc_as_text(service, doc["id"], doc["name"])
         if text:
+            basename = doc["name"].split("/")[-1].lower()
+            if basename == "_beebot-prompt":
+                system_prompt_written = True
             handle_config_doc(doc["name"], text.strip())
+
+    if not system_prompt_written:
+        log.warning(
+            "No '_beebot-prompt' doc found in Drive — bot will use built-in default system prompt. "
+            "Create a Google Doc named '_beebot-prompt' in the Drive folder to customize it."
+        )
 
     # Diff against previous run (KB docs only)
     old_manifest = load_manifest()
@@ -399,6 +515,7 @@ def run_sync():
     sections = []
     failed = []
     synced = []
+    external_errors = []  # tracks Eventbrite/WP failures for final summary
 
     for doc in kb_docs:
         log.info("Exporting: %s", doc["name"])
@@ -443,21 +560,31 @@ def run_sync():
     # ── Eventbrite events ──────────────────────────────────────────────────────
     if EVENTBRITE_PRIVATE_TOKEN and EVENTBRITE_ORG_ID:
         eb_events = fetch_eventbrite_events(EVENTBRITE_PRIVATE_TOKEN, EVENTBRITE_ORG_ID)
-        for event in eb_events:
-            sections.append(
-                f"=== DOCUMENT: {event['name']} ===\n\n"
-                f"{event['content']}\n\n"
-                f"=== END: {event['name']} ==="
-            )
-            synced.append(event["name"])
-        if not eb_events:
+        if eb_events is None:
+            external_errors.append("Eventbrite")
+        elif not eb_events:
             log.info("Eventbrite: no upcoming events found")
+        else:
+            for event in eb_events:
+                sections.append(
+                    f"=== DOCUMENT: {event['name']} ===\n\n"
+                    f"{event['content']}\n\n"
+                    f"=== END: {event['name']} ==="
+                )
+                synced.append(event["name"])
     else:
         log.info("Eventbrite sync skipped — EVENTBRITE_PRIVATE_TOKEN or EVENTBRITE_ORG_ID not set")
 
     # ── Write knowledge base (atomic) ─────────────────────────────────────────
     output_path = Path(OUTPUT_PATH)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Ensure the data directory is writable by non-root users (bot runs as appuser).
+    # This succeeds when sync runs as root; silently ignored otherwise.
+    try:
+        os.chmod(output_path.parent, 0o777)
+    except PermissionError:
+        pass
 
     header = (
         f"# BeeBot Knowledge Base\n"
@@ -467,12 +594,40 @@ def run_sync():
     )
 
     tmp_path = output_path.parent / (output_path.name + ".tmp")
-    tmp_path.write_text(header + "\n\n".join(sections), encoding="utf-8")
-    os.replace(tmp_path, output_path)
+    try:
+        tmp_path.write_text(header + "\n\n".join(sections), encoding="utf-8")
+        os.replace(tmp_path, output_path)
+    except PermissionError as e:
+        log.error("Permission denied writing knowledge base — run sync via 'docker compose run --rm beebot-sync': %s", e)
+        sys.exit(1)
+    except Exception as e:
+        log.error("Failed to write knowledge base: %s", e)
+        sys.exit(1)
     save_manifest(kb_docs)
 
     kb_size = output_path.stat().st_size
     log.info("Knowledge base written: %s (%d bytes, %d docs)", OUTPUT_PATH, kb_size, len(synced))
+
+    # Warn when KB size approaches thresholds where full-context injection degrades quality.
+    # ~80KB / ~20K tokens: flat-file approach still works but consider tiered loading.
+    # ~200KB / ~50K tokens: quality impact likely; RAG or tiered KB strongly recommended.
+    _KB_WARN_BYTES  = 80_000
+    _KB_URGENT_BYTES = 200_000
+    if kb_size >= _KB_URGENT_BYTES:
+        log.warning(
+            "KB SIZE CRITICAL: %d bytes (~%d tokens). Full-context injection will degrade answer "
+            "quality at this size. Consider RAG (vector embeddings + semantic retrieval) or a "
+            "tiered KB that loads only relevant sections per query. See architecture notes.",
+            kb_size, kb_size // 4,
+        )
+    elif kb_size >= _KB_WARN_BYTES:
+        log.warning(
+            "KB SIZE WARNING: %d bytes (~%d tokens). Consider a tiered KB that keeps core docs "
+            "(membership, hours, events) always loaded and injects tool manuals only when relevant "
+            "keywords are detected in the query. Full-context injection still works but may miss "
+            "details in large tool manual sets.",
+            kb_size, kb_size // 4,
+        )
 
     # Report changes
     if first_run:
@@ -481,7 +636,11 @@ def run_sync():
             log.info("  ✓ %s", name)
     else:
         if not any([diff["added"], diff["changed"], diff["removed"]]):
-            log.info("No changes since last sync.")
+            if external_errors:
+                log.warning("Google Drive: no changes. External sources with errors: %s",
+                            ", ".join(external_errors))
+            else:
+                log.info("No changes since last sync.")
         else:
             for name in diff["added"]:
                 log.info("  ➕ NEW: %s", name)
@@ -489,6 +648,10 @@ def run_sync():
                 log.info("  ✏️  UPDATED: %s", name)
             for name in diff["removed"]:
                 log.info("  🗑️  REMOVED: %s", name)
+
+    if external_errors:
+        log.warning("Sync completed with errors from: %s — check logs above for details",
+                    ", ".join(external_errors))
 
     for name in failed:
         log.warning("  ✗ FAILED: %s", name)
