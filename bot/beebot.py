@@ -491,7 +491,9 @@ def handle_new_member(body, say, logger):
         f"1. A greeting line tagging <@{user_id}> and welcoming them\n"
         f"2. 3-4 bullet points (using •) with the most immediately useful essentials from the knowledge base "
         f"(e.g. location, open houses, alarm code, Wi-Fi, beacon convention — pick what's most relevant)\n"
-        f"3. A closing line that says they can ask *@BeeBot* any onboarding or equipment questions anytime, "
+        f"3. One bullet suggesting 1-2 upcoming events from the knowledge base they might enjoy as a new member "
+        f"— include the event name and date. If no upcoming events are listed, skip this bullet.\n"
+        f"4. A closing line that says they can ask *@BeeBot* any onboarding or equipment questions anytime, "
         f"and ping @Hive76 Management for anything else\n\n"
         f"Slack formatting only — use *bold* for key info, no markdown headers, no ** double asterisks."
     )
@@ -609,6 +611,10 @@ def handle_sync_command(ack, respond, command):
         safe_output = "\n".join(safe_lines[-40:])
         if result.returncode == 0:
             respond(f"✅ Knowledge base updated.\n```{safe_output}```")
+            # System prompt loads once at startup — restart if sync_docs reports it changed
+            if "System prompt UPDATED" in output:
+                respond(f"{BOT_EMOJI} System prompt changed — restarting to apply it...")
+                sys.exit(0)
         else:
             respond(f"❌ Sync failed.\n```{safe_output}```")
     except Exception as e:

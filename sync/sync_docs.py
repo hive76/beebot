@@ -8,11 +8,13 @@ Google Docs whose names start with '_' are treated as config docs:
   Other _* docs   → skipped entirely
 """
 
+import html as _html_stdlib
 import json
 import os
 import sys
 import logging
 import re
+import urllib.parse
 from html.parser import HTMLParser
 from pathlib import Path
 from datetime import datetime, timezone
@@ -127,15 +129,22 @@ def _collect_docs(service, root_folder_id: str, folder_id: str, path_prefix: str
 
 
 def export_doc_as_text(service, doc_id: str, doc_name: str) -> str | None:
-    """Export a Google Doc as plain text. Returns None on failure (logged)."""
+    """Export a Google Doc as HTML and return stripped plain text.
+
+    Exports as HTML (rather than text/plain) so that hyperlinks are preserved:
+    absolute https:// URLs are rendered as 'link text (url)' by strip_html().
+    Returns None on failure (logged).
+    """
     try:
         request = service.files().export_media(
-            fileId=doc_id, mimeType="text/plain"
+            fileId=doc_id, mimeType="text/html"
         )
         content = request.execute()
-        if isinstance(content, bytes):
-            return content.decode("utf-8", errors="replace").replace('\ufeff', '')
-        return content.replace('\ufeff', '') if isinstance(content, str) else content
+        html = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content
+        text = strip_html(html.replace('\ufeff', ''))
+        # Remove Markdown image references that appear as literal text in Google Docs exports
+        text = re.sub(r'!\[[^\]]*\]\([^)]*\)', '', text)
+        return text
     except HttpError as e:
         log.error("Failed to export doc '%s' (%s): %s", doc_name, doc_id, e)
         return None
@@ -155,41 +164,87 @@ def handle_config_doc(doc_name: str, text: str):
     if basename == "_beebot-prompt":
         path = Path(SYSTEM_PROMPT_PATH)
         path.parent.mkdir(parents=True, exist_ok=True)
+        old_text = path.read_text(encoding="utf-8") if path.exists() else None
         path.write_text(text, encoding="utf-8")
-        log.info("System prompt written: %s (%d chars)", SYSTEM_PROMPT_PATH, len(text))
+        if old_text is None:
+            log.info("System prompt written (first time): %s (%d chars)", SYSTEM_PROMPT_PATH, len(text))
+        elif old_text != text:
+            log.info("System prompt UPDATED: %s (%d → %d chars)", SYSTEM_PROMPT_PATH, len(old_text), len(text))
+        else:
+            log.info("System prompt unchanged: %s (%d chars)", SYSTEM_PROMPT_PATH, len(text))
     else:
         log.info("Config doc '%s' — no handler, skipping", doc_name)
 
 
 # ── WordPress Sync ────────────────────────────────────────────────────────────
 
+def _unwrap_google_url(href: str) -> str:
+    """Extract the real URL from a Google redirect wrapper (google.com/url?q=...)."""
+    try:
+        parsed = urllib.parse.urlparse(href)
+        if parsed.netloc == "www.google.com" and parsed.path == "/url":
+            q = urllib.parse.parse_qs(parsed.query).get("q", [""])[0]
+            if q:
+                return urllib.parse.unquote(q)
+    except Exception:
+        pass
+    return href
+
+
 class _HTMLStripper(HTMLParser):
+    # Tags whose entire content block should be ignored (CSS, JS, document metadata)
+    _SKIP_TAGS = frozenset({"style", "script", "head"})
+    # Block-level tags that introduce a line break on both open and close
+    _BLOCK_TAGS = frozenset({"p", "div", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol", "table"})
+
     def __init__(self):
-        super().__init__()
+        super().__init__(convert_charrefs=True)  # auto-decode &amp; &#038; &nbsp; etc.
         self._chunks = []
         self._current_href = None
+        self._skip_depth = 0  # counter handles nested skip tags (e.g. <style> inside <head>)
 
     def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP_TAGS:
+            self._skip_depth += 1
+            return
+        if self._skip_depth:
+            return
         if tag == "a":
-            attrs_dict = dict(attrs)
-            href = attrs_dict.get("href", "")
+            href = _unwrap_google_url(dict(attrs).get("href", ""))
             if href and href.startswith("http"):
                 self._current_href = href
         elif tag in ("td", "th"):
             self._chunks.append(" ")
+        elif tag == "li":
+            self._chunks.append("\n- ")
+        elif tag == "br":
+            self._chunks.append("\n")
+        elif tag in self._BLOCK_TAGS:
+            self._chunks.append("\n")
 
     def handle_endtag(self, tag):
+        if tag in self._SKIP_TAGS:
+            self._skip_depth = max(0, self._skip_depth - 1)
+            return
+        if self._skip_depth:
+            return
         if tag == "a" and self._current_href:
             self._chunks.append(f" ({self._current_href})")
             self._current_href = None
-        elif tag == "tr":
+        elif tag in ("tr", *self._BLOCK_TAGS):
             self._chunks.append("\n")
 
     def handle_data(self, data):
-        self._chunks.append(data)
+        if not self._skip_depth:
+            self._chunks.append(data.replace('\xa0', ' '))  # non-breaking space → regular space
 
     def get_text(self):
-        return re.sub(r'\n{3,}', '\n\n', "".join(self._chunks)).strip()
+        text = "".join(self._chunks)
+        text = re.sub(r'[ \t]+', ' ', text)        # collapse runs of spaces/tabs to one space
+        text = re.sub(r' *\n *', '\n', text)        # strip spaces that flank newlines
+        text = re.sub(r'\n- *\n', '\n', text)       # remove empty bullet points (bare "- " lines)
+        text = re.sub(r'\n{3,}', '\n\n', text)      # max two consecutive newlines
+        return text.strip()
 
 
 def strip_html(html: str) -> str:
@@ -235,7 +290,7 @@ def fetch_wordpress_pages(base_url: str, category: str) -> list[dict]:
             if slug in WORDPRESS_SLUG_BLOCKLIST:
                 log.info("  ⊘ WP skip (blocklist): %s", slug)
                 continue
-            title = item["title"]["rendered"]
+            title = _html_stdlib.unescape(item["title"]["rendered"])
             content = strip_html(item["content"]["rendered"])
             if content:
                 results.append({
@@ -265,7 +320,7 @@ def fetch_wordpress_pages(base_url: str, category: str) -> list[dict]:
                 if not items:
                     break
                 for item in items:
-                    title = item["title"]["rendered"]
+                    title = _html_stdlib.unescape(item["title"]["rendered"])
                     content = strip_html(item["content"]["rendered"])
                     if content:
                         results.append({

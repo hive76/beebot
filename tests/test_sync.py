@@ -39,8 +39,8 @@ class TestHtmlTableStripping:
 
     def test_bom_not_present_in_stripped_output(self):
         html = "\ufeff<p>Hello</p>"
-        # strip_html itself doesn't strip BOM (that's export_doc_as_text's job),
-        # but verify it passes through so we can confirm the export layer strips it
+        # strip_html itself doesn't strip BOM (that's export_doc_as_text's job);
+        # verify it passes through here so the export layer test confirms removal
         result = sync_docs.strip_html(html)
         assert "Hello" in result
 
@@ -80,6 +80,123 @@ class TestStripHtml:
         result = sync_docs.strip_html(html)
         assert "A (https://a.com)" in result
         assert "B (https://b.com)" in result
+
+    def test_style_block_stripped(self):
+        html = "<style>.lst-kix > li:before{content:'●'}</style><p>Hello</p>"
+        result = sync_docs.strip_html(html)
+        assert "lst-kix" not in result
+        assert "Hello" in result
+
+    def test_script_block_stripped(self):
+        html = "<script>var x = 1;</script><p>World</p>"
+        result = sync_docs.strip_html(html)
+        assert "var x" not in result
+        assert "World" in result
+
+    def test_head_block_stripped(self):
+        html = "<head><title>Doc Title</title><style>.foo{color:red}</style></head><body><p>Content</p></body>"
+        result = sync_docs.strip_html(html)
+        assert "Doc Title" not in result
+        assert ".foo" not in result
+        assert "Content" in result
+
+    def test_nested_skip_tags(self):
+        # <style> inside <head> should not prematurely re-enable output
+        html = "<head><style>.x{}</style><title>Meta</title></head><p>Real</p>"
+        result = sync_docs.strip_html(html)
+        assert "Meta" not in result
+        assert ".x" not in result
+        assert "Real" in result
+
+    def test_google_redirect_url_unwrapped(self):
+        url = "https://www.google.com/url?q=https://example.com/page&sa=D&source=editors&usg=xyz"
+        html = f'<a href="{url}">click here</a>'
+        result = sync_docs.strip_html(html)
+        assert "https://example.com/page" in result
+        assert "google.com/url" not in result
+
+    def test_google_url_with_encoded_params(self):
+        url = "https://www.google.com/url?q=https://docs.google.com/d/abc?usp%3Dsharing&sa=D"
+        html = f'<a href="{url}">Guide</a>'
+        result = sync_docs.strip_html(html)
+        assert "https://docs.google.com/d/abc?usp=sharing" in result
+
+    def test_paragraph_tags_produce_newlines(self):
+        html = "<p>First paragraph.</p><p>Second paragraph.</p>"
+        result = sync_docs.strip_html(html)
+        assert "First paragraph." in result
+        assert "Second paragraph." in result
+        assert "\n" in result
+
+    def test_list_items_get_bullet_prefix(self):
+        html = "<ul><li>Item one</li><li>Item two</li></ul>"
+        result = sync_docs.strip_html(html)
+        assert "- Item one" in result
+        assert "- Item two" in result
+
+    def test_heading_tags_produce_newlines(self):
+        html = "<h2>Section Title</h2><p>Body text.</p>"
+        result = sync_docs.strip_html(html)
+        assert "Section Title" in result
+        assert "Body text." in result
+        assert result.index("Section Title") < result.index("Body text.")
+
+    def test_nbsp_converted_to_space(self):
+        html = "<p>Hello&nbsp;World</p>"
+        result = sync_docs.strip_html(html)
+        assert "Hello World" in result
+        assert "\xa0" not in result
+
+    def test_html_entities_decoded(self):
+        html = "<p>Classes &amp; Events &#038; More</p>"
+        result = sync_docs.strip_html(html)
+        assert "Classes & Events & More" in result
+        assert "&amp;" not in result
+        assert "&#038;" not in result
+
+
+# ── Google Doc Export ──────────────────────────────────────────────────────────
+
+class TestExportDocAsText:
+    def _make_service(self, html_bytes: bytes):
+        """Return a mock Drive service that returns html_bytes on export_media."""
+        mock_request = MagicMock()
+        mock_request.execute.return_value = html_bytes
+        mock_files = MagicMock()
+        mock_files.export_media.return_value = mock_request
+        mock_service = MagicMock()
+        mock_service.files.return_value = mock_files
+        return mock_service
+
+    def test_preserves_hyperlinks(self):
+        html = b'<p>See the <a href="https://example.com/manual">Instruction Manual</a> for details.</p>'
+        service = self._make_service(html)
+        result = sync_docs.export_doc_as_text(service, "doc-id", "test-doc")
+        assert "Instruction Manual" in result
+        assert "https://example.com/manual" in result
+
+    def test_strips_bom(self):
+        html = "\ufeff<p>Hello</p>".encode("utf-8")
+        service = self._make_service(html)
+        result = sync_docs.export_doc_as_text(service, "doc-id", "test-doc")
+        assert "\ufeff" not in result
+        assert "Hello" in result
+
+    def test_markdown_image_references_stripped(self):
+        html = b"<p>![Alt text](/local/path/image.jpg)See the manual.</p>"
+        service = self._make_service(html)
+        result = sync_docs.export_doc_as_text(service, "doc-id", "test-doc")
+        assert "![" not in result
+        assert "See the manual." in result
+
+    def test_returns_none_on_http_error(self):
+        from googleapiclient.errors import HttpError
+        mock_request = MagicMock()
+        mock_request.execute.side_effect = HttpError(MagicMock(status=403), b"Forbidden")
+        mock_service = MagicMock()
+        mock_service.files.return_value.export_media.return_value = mock_request
+        result = sync_docs.export_doc_as_text(mock_service, "doc-id", "test-doc")
+        assert result is None
 
 
 # ── Manifest Diff ──────────────────────────────────────────────────────────────
