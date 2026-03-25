@@ -6,8 +6,9 @@ VERSION := $(shell cat VERSION)
 build:
 	docker build --target production -t beebot:$(VERSION) -t beebot:latest .
 
-## Deploy (or redeploy) the bot container with the latest image
+## Pull latest image from GHCR and redeploy
 deploy:
+	docker compose pull beebot
 	docker compose up -d --force-recreate beebot
 
 ## Run a one-off knowledge base sync

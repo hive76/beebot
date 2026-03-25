@@ -1,6 +1,6 @@
 services:
   beebot:
-    image: beebot:latest
+    image: ghcr.io/hive76/beebot:latest
     container_name: beebot
     restart: unless-stopped
 
@@ -30,10 +30,10 @@ services:
       start_period: 15s
 
   # Separate sync container — runs once and exits
-  # Trigger manually in Portainer or via cron on host:
+  # Trigger manually or via cron on host:
   #   docker compose run --rm beebot-sync
   beebot-sync:
-    image: beebot:latest
+    image: ghcr.io/hive76/beebot:latest
     container_name: beebot-sync
     restart: "no"
     user: "0:0"   # sync writes to the shared volume; root avoids permission issues
@@ -49,6 +49,17 @@ services:
       - ./config/service-account.json:/app/config/service-account.json:ro
 
     command: ["python", "sync/sync_docs.py"]
+
+  # Watchtower — polls GHCR every 5 minutes, pulls new image, restarts beebot
+  # Requires: docker login ghcr.io on the host (PAT with read:packages scope)
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /root/.docker/config.json:/config.json:ro
+    command: --interval 300 beebot
 
 volumes:
   beebot_data:

@@ -6,12 +6,9 @@ on:
   workflow_dispatch:   # allow manual trigger from GitHub UI
 
 jobs:
-  deploy:
-    name: Build, Push, Deploy
+  publish:
+    name: Build and Push Image
     runs-on: ubuntu-latest
-    # Only deploy after tests and secret scan pass
-    needs: []   # CI runs separately; deploy is triggered by push to main
-                # Enable branch protection to require CI to pass before merge
 
     permissions:
       contents: read
@@ -31,19 +28,8 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          target: production
           push: true
           tags: |
             ghcr.io/hive76/beebot:latest
             ghcr.io/hive76/beebot:${{ github.sha }}
-
-      - name: Deploy to frame.hive76.org
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.DEPLOY_HOST }}
-          username: ${{ secrets.DEPLOY_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          script: |
-            cd /opt/beebot
-            docker compose pull
-            docker compose up -d --remove-orphans
-            docker image prune -f
