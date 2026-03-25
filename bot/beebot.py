@@ -67,6 +67,10 @@ ADMIN_USER_IDS = set(
     for uid in os.environ.get("ADMIN_SLACK_USER_IDS", "").split(",")
     if uid.strip()
 )
+_SLACK_UID_RE = re.compile(r'^U[A-Z0-9]{8,}$')
+for _uid in ADMIN_USER_IDS:
+    if not _SLACK_UID_RE.match(_uid):
+        log.warning("ADMIN_SLACK_USER_IDS contains suspicious value: %r", _uid)
 
 # ── Runtime Config (from /app/data/runtime_config.json — managed via Slack) ──
 
@@ -618,7 +622,8 @@ def handle_sync_command(ack, respond, command):
         else:
             respond(f"❌ Sync failed.\n```{safe_output}```")
     except Exception as e:
-        respond(f"❌ Sync error: {e}")
+        log.error("Sync error: %s", e)
+        respond("❌ Sync failed. Check `/beebot-logs` for details.")
 
 
 def handle_config_command(ack, respond, command):
@@ -872,7 +877,8 @@ def handle_logs_command(ack, respond, command):
             "response_type": "ephemeral",
         })
     except Exception as e:
-        respond(f"❌ Error reading logs: {e}")
+        log.error("Log read error: %s", e)
+        respond("❌ Error reading logs. Check the host log file directly.")
 
 
 def handle_restart_command(ack, respond, command):

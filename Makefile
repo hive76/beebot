@@ -2,9 +2,9 @@ VERSION := $(shell cat VERSION)
 
 .PHONY: build deploy sync logs restart release test scan scan-vulns scan-secrets
 
-## Build the Docker image, tagged with version and latest
+## Build the production Docker image (test stage runs automatically during build)
 build:
-	docker build -t beebot:$(VERSION) -t beebot:latest .
+	docker build --target production -t beebot:$(VERSION) -t beebot:latest .
 
 ## Deploy (or redeploy) the bot container with the latest image
 deploy:
@@ -22,9 +22,9 @@ logs:
 restart:
 	docker compose restart beebot
 
-## Run unit tests inside a fresh Docker image
+## Run unit tests in the test stage (no prod image needed)
 test:
-	docker run --rm beebot:latest python -m pytest tests/ -v
+	docker build --target test .
 
 ## Scan image for CVEs (HIGH/CRITICAL fail the build)
 ## Requires trivy: https://trivy.dev/docs/getting-started/installation/
