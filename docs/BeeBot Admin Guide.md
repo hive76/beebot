@@ -161,6 +161,6 @@ To have an event show up: just publish it on Eventbrite as normal. It will sync 
 
 ## Who to Contact
 
-For technical issues (bot down, sync failing, code changes): **Chris Hamilton** (CTO) in Slack or `hamilton@hive76.org`.
+For technical issues (bot down, sync failing, code changes) contat Hive76's CTO.
 
 For content issues (wrong answers, missing info): edit the relevant Google Doc and re-sync.
