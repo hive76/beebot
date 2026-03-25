@@ -23,7 +23,7 @@ services:
         max-file: "5"
 
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "beebot.py"]
+      test: ["CMD", "sh", "-c", "kill -0 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -50,16 +50,8 @@ services:
 
     command: ["python", "sync/sync_docs.py"]
 
-  # Watchtower — polls GHCR every 5 minutes, pulls new image, restarts beebot
-  # Requires: docker login ghcr.io on the host (PAT with read:packages scope)
-  watchtower:
-    image: containrrr/watchtower
-    container_name: watchtower
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /root/.docker/config.json:/config.json:ro
-    command: --interval 300 beebot
+  # Auto-update: image pulls are handled by a host cron job (see README Step 5)
+  # This avoids Docker socket permission issues with userns-remap.
 
 volumes:
   beebot_data:

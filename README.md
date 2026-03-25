@@ -27,7 +27,7 @@ Hive76 WordPress site, and Eventbrite events.
 5. Create and download a JSON key:
    - Click the service account → Keys → Add Key → Create new key → JSON
    - Save as `config/service-account.json` in this directory
-6. Note the service account **email address** (looks like `beebot-sync@hive76-beebot.iam.gserviceaccount.com`)
+6. Note the service account **email address** (looks like `beebot-sync@YOUR-PROJECT-ID.iam.gserviceaccount.com`)
 
 ### Share the Drive folder with the service account
 
@@ -132,28 +132,21 @@ docker logs -f beebot
 
 ---
 
-## Step 5 — Automatic Updates (Watchtower)
+## Step 5 — Automatic Updates (Cron Pull)
 
 BeeBot uses a pull-based deployment model. When commits are merged to `main`,
 GitHub Actions builds a new image and pushes it to
-`ghcr.io/hive76/beebot:latest`. Watchtower on the host polls for new images
-and restarts the container automatically — no SSH access from CI required.
+`ghcr.io/hive76/beebot:latest`. A host cron job polls for new images and
+restarts the container — no SSH access from CI required.
 
-Add Watchtower to your host's `docker-compose.yml` (or run it separately):
+Add to crontab on the host (`crontab -e`):
 
-```yaml
-  watchtower:
-    image: containrrr/watchtower
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /root/.docker/config.json:/config.json:ro  # for GHCR auth
-    command: --interval 300 beebot   # poll every 5 min, watch beebot only
+```bash
+# Pull and redeploy beebot every 5 minutes (no-op if image hasn't changed)
+*/5 * * * * cd /opt/beebot && docker compose pull beebot --quiet && docker compose up -d --no-deps beebot >> /var/log/beebot-update.log 2>&1
 ```
 
-To authenticate Watchtower with GHCR, create a GitHub PAT with `read:packages`
-scope and run `docker login ghcr.io` on the host — Watchtower picks up the
-stored credentials automatically.
+Since `ghcr.io/hive76/beebot` is a public image, no GHCR authentication is needed.
 
 ---
 
@@ -256,5 +249,5 @@ Google Drive (HiveBot Docs folder)
 GitHub (hive76/beebot)
   └── GitHub Actions CI (test + secret scan on PRs)
         └── GHCR (ghcr.io/hive76/beebot:latest)
-              └── Watchtower on host (polls, pulls, restarts)
+              └── host cron (polls every 5 min, pulls, restarts)
 ```
