@@ -1,14 +1,14 @@
 # BeeBot 🐝
 
 Hive76's Slack assistant. Answers questions in `#new-members` and responds to
-`@BeeBot` mentions anywhere. Pulls its knowledge from Google Drive docs.
+`@BeeBot` mentions anywhere. Pulls its knowledge from Google Drive docs, the
+Hive76 WordPress site, and Eventbrite events.
 
 ---
 
 ## Prerequisites
 
-- Docker + Docker Compose installed on the Linode
-- Portainer running (or plain Docker Compose if you prefer)
+- A Linux host with Docker + Docker Compose
 - A Hive76 Google Workspace admin account
 - An Anthropic API account (console.anthropic.com)
 
@@ -66,10 +66,14 @@ The service account can now read all docs in that folder and subfolders.
   - `message.channels`
 
 ### Slash Commands
-- Features → Slash Commands → Create New Command
-  - Command: `/beebot-sync`
-  - Short description: `Force knowledge base sync (admin only)`
-  - Usage hint: (leave blank)
+- Features → Slash Commands → Create New Command for each:
+
+| Command | Description |
+|---------|-------------|
+| `/beebot-sync` | Force knowledge base sync (admin only) |
+| `/beebot-config` | View and manage bot configuration (admin only) |
+| `/beebot-logs` | View recent bot logs (admin only) |
+| `/beebot-restart` | Restart the bot process (admin only) |
 
 ### Install App
 - Settings → Install App → Install to Workspace → Allow
@@ -90,21 +94,19 @@ Looks like: `C08XXXXXXXX`
 ## Step 3 — Anthropic API Key
 
 1. Go to [console.anthropic.com](https://console.anthropic.com)
-2. API Keys → Create Key → name it `beebot-linode`
+2. API Keys → Create Key → name it `beebot`
 3. Copy the key → `ANTHROPIC_API_KEY`
 
 ---
 
-## Step 4 — Deploy on Linode
+## Step 4 — Deploy
 
 ```bash
-# SSH into your Linode
-ssh user@your-linode-ip
+# SSH into your server
+ssh user@your-server
 
-# Clone or copy the beebot directory
-mkdir -p /opt/beebot
-# scp or git clone the files here
-
+# Clone the repo
+git clone https://github.com/hive76/beebot.git /opt/beebot
 cd /opt/beebot
 
 # Copy env file and fill in values
@@ -115,14 +117,11 @@ nano .env   # fill in all REPLACE-ME values
 mkdir -p config
 # scp service-account.json to config/service-account.json
 
-# Build the image
-docker build -t beebot:latest .
+# Pull the image from GitHub Container Registry
+docker compose pull
 
 # Run initial sync to populate knowledge base
 docker compose run --rm beebot-sync
-
-# Verify knowledge base was created
-docker compose run --rm beebot-sync  # check logs for "✓" entries
 
 # Start the bot
 docker compose up -d beebot
@@ -131,72 +130,70 @@ docker compose up -d beebot
 docker logs -f beebot
 ```
 
-### Set up daily sync cron
+---
+
+## Step 5 — Automatic Updates (Watchtower)
+
+BeeBot uses a pull-based deployment model. When commits are merged to `main`,
+GitHub Actions builds a new image and pushes it to
+`ghcr.io/hive76/beebot:latest`. Watchtower on the host polls for new images
+and restarts the container automatically — no SSH access from CI required.
+
+Add Watchtower to your host's `docker-compose.yml` (or run it separately):
+
+```yaml
+  watchtower:
+    image: containrrr/watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /root/.docker/config.json:/config.json:ro  # for GHCR auth
+    command: --interval 300 beebot   # poll every 5 min, watch beebot only
+```
+
+To authenticate Watchtower with GHCR, create a GitHub PAT with `read:packages`
+scope and run `docker login ghcr.io` on the host — Watchtower picks up the
+stored credentials automatically.
+
+---
+
+## Step 6 — Daily Sync Cron
+
+The sync container runs once and exits. Trigger it on a schedule via cron on the host:
 
 ```bash
-chmod +x /opt/beebot/cron-sync.sh
-
-# Edit crontab
 crontab -e
-
-# Add this line (runs at 3am UTC daily):
-0 3 * * * /opt/beebot/cron-sync.sh >> /var/log/beebot-sync.log 2>&1
+# Add (runs at 3am daily):
+0 3 * * * docker compose -f /opt/beebot/docker-compose.yml run --rm beebot-sync >> /var/log/beebot-sync.log 2>&1
 ```
+
+Or trigger it manually anytime with `/beebot-sync` in Slack.
 
 ---
 
-## Step 5 — Portainer Setup
+## Slash Commands Reference
 
-If you're managing via Portainer instead of CLI:
+### `/beebot-sync`
+Triggers an immediate knowledge base sync from Google Drive, WordPress, and Eventbrite. Admin only.
 
-1. In Portainer → Stacks → Add Stack
-2. Name: `beebot`
-3. Upload or paste the `docker-compose.yml`
-4. Set environment variables in the "Environment variables" section
-   (or use the .env file approach if your Portainer is on the same host)
-5. Deploy the stack
+### `/beebot-config`
+View and manage runtime configuration. Admin only.
 
-To run a manual sync from Portainer:
-- Containers → beebot-sync → run a one-off task
-- Or: use the "Exec console" on the beebot container to run `python sync/sync_docs.py`
+| Subcommand | Example | Description |
+|------------|---------|-------------|
+| `show` | `/beebot-config show` | Display all current settings |
+| `set KEY value` | `/beebot-config set BOT_EMOJI :bee:` | Update a setting |
+| `reset KEY` | `/beebot-config reset BOT_EMOJI` | Reset a setting to default |
+| `export` | `/beebot-config export` | Export full config as JSON |
+| `wp-blocklist-show` | `/beebot-config wp-blocklist-show` | List blocked WordPress slugs |
+| `wp-blocklist-add slug` | `/beebot-config wp-blocklist-add events` | Block a WordPress slug from sync |
+| `wp-blocklist-remove slug` | `/beebot-config wp-blocklist-remove events` | Unblock a slug |
 
----
+### `/beebot-logs`
+Returns the last 50 lines of the bot log as an ephemeral message. Admin only.
 
-## Managing Knowledge Base Docs
-
-### Adding a new doc
-1. Create a Google Doc in the `HiveBot Docs` Drive folder
-2. Wait for 3am cron, OR run `/beebot-sync` in Slack
-
-### Updating an existing doc
-1. Edit the Google Doc normally
-2. Wait for 3am cron, OR run `/beebot-sync` in Slack
-
-### Subfolder structure (recommended)
-```
-HiveBot Docs/
-  bylaws.gdoc
-  orientation-guide.gdoc
-  equipment/
-    laser-cutter.gdoc
-    summacut-d120.gdoc
-    3d-printer.gdoc
-    cnc.gdoc
-  faq.gdoc
-```
-
-The sync script recursively walks all subfolders. Doc names appear in the
-knowledge base headers so Claude knows which doc each section came from.
-
----
-
-## Slash Commands
-
-| Command | Who | What |
-|---|---|---|
-| `/beebot-sync` | Admins only | Force immediate knowledge base sync from Drive |
-
-Admin user IDs are set in `.env` as `ADMIN_SLACK_USER_IDS`.
+### `/beebot-restart`
+Gracefully exits the bot process — Docker's restart policy brings it back within seconds. Admin only.
 
 ---
 
@@ -211,14 +208,36 @@ Admin user IDs are set in `.env` as `ADMIN_SLACK_USER_IDS`.
 - Check service account JSON is at `config/service-account.json`
 - Verify the Drive folder is shared with the service account email
 - Run `docker compose run --rm beebot-sync` and check output
+- Use `/beebot-logs` in Slack for recent error detail
 
 **Wrong answers / missing info**
 - Check knowledge base: `docker exec beebot cat /app/data/knowledge_base.txt`
-- If doc is missing, confirm it's a Google Doc (not a Sheet/Slide/PDF) in the folder
+- If a doc is missing, confirm it's a Google Doc (not a Sheet/Slide/PDF) in the folder
 - Run `/beebot-sync` to force a refresh
 
 **Rate limit hitting legitimate users**
-- Increase `RATE_LIMIT_MAX` in `.env` and restart: `docker compose restart beebot`
+- Increase `RATE_LIMIT_MAX` via `/beebot-config set RATE_LIMIT_MAX 20`
+
+---
+
+## Development
+
+```bash
+# Run tests (inside Docker test stage)
+make test
+
+# Build production image
+make build
+
+# Scan for secrets and CVEs
+make scan
+```
+
+Tests run automatically in the Docker test stage — if they fail, the build fails.
+The CI pipeline (GitHub Actions) runs tests and secret scanning on every PR.
+
+See [docs/BeeBot Admin Guide.md](docs/BeeBot%20Admin%20Guide.md) for the
+non-technical content management guide intended for Hive76 management.
 
 ---
 
@@ -233,4 +252,9 @@ Google Drive (HiveBot Docs folder)
                           ├── #new-members: all messages
                           ├── anywhere: @BeeBot mentions
                           └── Anthropic API (claude-haiku-4-5)
+
+GitHub (hive76/beebot)
+  └── GitHub Actions CI (test + secret scan on PRs)
+        └── GHCR (ghcr.io/hive76/beebot:latest)
+              └── Watchtower on host (polls, pulls, restarts)
 ```

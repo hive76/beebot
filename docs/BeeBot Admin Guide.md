@@ -45,8 +45,8 @@ HiveBot Docs/
     anti-harassment
 ```
 
-### Keeping sensitive info private
-Any Google Doc with a name starting with `_` (underscore) is **skipped during sync** — BeeBot will never read it. Use this for docs that should stay in Drive but must never appear in BeeBot's knowledge base (access codes, alarm codes, internal passwords, etc.):
+### Keeping sensitive info out of BeeBot
+Any Google Doc with a name starting with `_` (underscore) is **skipped during sync** — BeeBot will never read it. Use this for docs that should stay in Drive but must never be included in BeeBot's knowledge (alarm codes, internal passwords, etc.):
 
 ```
 HiveBot Docs/
@@ -76,15 +76,27 @@ The `{knowledge_base}` placeholder in that doc must stay exactly as-is — BeeBo
 
 All of the following commands are admin-only (members listed in the bot config).
 
-| Command | What it does |
-|---------|-------------|
-| `/beebot-sync` | Trigger an immediate knowledge base sync |
-| `/beebot-logs` | View the last 50 lines of the bot's log (useful for troubleshooting) |
-| `/beebot-config show` | View all current bot settings |
-| `/beebot-config set KEY value` | Update a bot setting (e.g. change the Eventbrite token) |
-| `/beebot-restart` | Restart the bot process (takes ~10 seconds) |
+### `/beebot-sync`
+Triggers an immediate knowledge base sync from Google Drive, WordPress, and Eventbrite. You'll see a confirmation and a log of what was synced. BeeBot uses the updated knowledge immediately — no restart needed.
 
-After running `/beebot-sync`, BeeBot uses the updated knowledge immediately — no restart needed.
+### `/beebot-logs`
+Returns the last 50 lines of the bot's log as a private message. Useful for diagnosing sync failures or unexpected behavior.
+
+### `/beebot-config`
+View and update runtime settings.
+
+| Subcommand | Example | What it does |
+|------------|---------|--------------|
+| `show` | `/beebot-config show` | Display all current settings |
+| `set KEY value` | `/beebot-config set BOT_EMOJI :bee:` | Update a setting |
+| `reset KEY` | `/beebot-config reset BOT_EMOJI` | Reset a setting to its default |
+| `export` | `/beebot-config export` | Export full config as JSON |
+| `wp-blocklist-show` | `/beebot-config wp-blocklist-show` | List blocked WordPress page slugs |
+| `wp-blocklist-add slug` | `/beebot-config wp-blocklist-add events` | Exclude a WordPress page from sync |
+| `wp-blocklist-remove slug` | `/beebot-config wp-blocklist-remove events` | Re-include a WordPress page |
+
+### `/beebot-restart`
+Restarts the bot process. Takes about 10 seconds — BeeBot will briefly be unresponsive. Use this after making config changes that require a restart.
 
 ---
 
@@ -100,7 +112,7 @@ BeeBot automatically syncs these top-level pages from hive76.org:
 - Fundraising Campaign
 - Classes & Events
 
-Some pages are intentionally excluded (billing, membership registration, password reset, etc.). If you want to add or remove a page, ask the CTO to update the blocklist.
+Some pages are intentionally excluded (billing, membership registration, password reset, etc.). To add or remove a page, use `/beebot-config wp-blocklist-add` or `wp-blocklist-remove` in Slack, or ask the CTO.
 
 ---
 
