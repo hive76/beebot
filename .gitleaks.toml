@@ -1,0 +1,27 @@
+title = "BeeBot gitleaks config"
+
+# Extend built-in rules with Slack-specific token patterns
+[[rules]]
+id = "slack-app-token"
+description = "Slack App-Level Token"
+regex = '''xapp-[0-9]-[A-Z0-9]+-[0-9]+-[a-f0-9]+'''
+tags = ["slack", "token"]
+
+[[rules]]
+id = "slack-bot-token"
+description = "Slack Bot Token"
+regex = '''xoxb-[0-9]+-[a-zA-Z0-9]+'''
+tags = ["slack", "token"]
+
+[[rules]]
+id = "slack-user-token"
+description = "Slack User Token"
+regex = '''xoxp-[0-9]+-[0-9]+-[0-9]+-[a-f0-9]+'''
+tags = ["slack", "token"]
+
+[allowlist]
+# Test files use clearly fake tokens
+paths = [
+    "tests/test_bot.py",
+    "tests/test_sync.py",
+]
