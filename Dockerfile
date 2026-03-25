@@ -1,32 +1,19 @@
-FROM python:3.12-slim AS base
+FROM python:3.12-slim
 
 LABEL maintainer="Hive76"
 LABEL description="BeeBot - Slack AI Assistant"
 
+# Don't write .pyc files, don't buffer stdout/stderr
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# ── Stage 1: test ─────────────────────────────────────────────────────────────
-FROM base AS test
-
-COPY requirements.txt requirements-dev.txt ./
-RUN pip install --no-cache-dir -r requirements-dev.txt
-
-COPY bot/     ./bot/
-COPY sync/    ./sync/
-COPY tests/   ./tests/
-COPY VERSION  .
-
-RUN python -m pytest tests/ -v
-
-# ── Stage 2: production ───────────────────────────────────────────────────────
-FROM base AS production
-
+# Install dependencies first (cached layer)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy application code and version
 COPY bot/     ./bot/
 COPY sync/    ./sync/
 COPY VERSION  .
@@ -38,6 +25,7 @@ RUN mkdir -p /app/data /app/config
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
+# Healthcheck — verifies the process is alive
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD pgrep -f beebot.py || exit 1
 

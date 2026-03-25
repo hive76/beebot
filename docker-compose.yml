@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   beebot:
     image: beebot:latest
@@ -36,7 +38,6 @@ services:
     image: beebot:latest
     container_name: beebot-sync
     restart: "no"
-    user: "0:0"   # sync writes to the shared volume; root avoids permission issues
 
     extra_hosts:
       - "host.docker.internal:host-gateway"

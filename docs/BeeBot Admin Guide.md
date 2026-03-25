@@ -45,6 +45,15 @@ HiveBot Docs/
     anti-harassment
 ```
 
+### Keeping sensitive info private
+Any Google Doc with a name starting with `_` (underscore) is **skipped during sync** — BeeBot will never read it. Use this for docs that should stay in Drive but must never appear in BeeBot's knowledge base (access codes, alarm codes, internal passwords, etc.):
+
+```
+HiveBot Docs/
+  Wi-Fi Networks          ← synced (BeeBot can answer Wi-Fi questions)
+  _facility-access-codes  ← NOT synced (alarm code, door codes stay private)
+```
+
 ### What file types work?
 Only **Google Docs** are synced. Google Sheets, PDFs, and uploaded Word/text files are ignored. If content isn't showing up, make sure it's in a Google Doc format.
 
@@ -63,13 +72,19 @@ The `{knowledge_base}` placeholder in that doc must stay exactly as-is — BeeBo
 
 ---
 
-## Running a Manual Sync
+## Admin Commands
 
-Type `/beebot-sync` in any Slack channel. You'll see a confirmation and a log of what was synced.
+All of the following commands are admin-only (members listed in the bot config).
 
-Only admins (members listed in the bot config) can run this command.
+| Command | What it does |
+|---------|-------------|
+| `/beebot-sync` | Trigger an immediate knowledge base sync |
+| `/beebot-logs` | View the last 50 lines of the bot's log (useful for troubleshooting) |
+| `/beebot-config show` | View all current bot settings |
+| `/beebot-config set KEY value` | Update a bot setting (e.g. change the Eventbrite token) |
+| `/beebot-restart` | Restart the bot process (takes ~10 seconds) |
 
-After syncing, BeeBot uses the updated knowledge immediately — no restart needed.
+After running `/beebot-sync`, BeeBot uses the updated knowledge immediately — no restart needed.
 
 ---
 
@@ -113,7 +128,7 @@ To have an event show up: just publish it on Eventbrite as normal. It will sync 
 - Fill in the placeholder and run `/beebot-sync`
 
 ### /beebot-sync says "Sync failed"
-- The log output will show which step failed
+- Run `/beebot-logs` to see what went wrong
 - Most common causes: Google Drive permission issue, or WordPress is temporarily unavailable
 - Ask the CTO if it's not obvious from the log
 
