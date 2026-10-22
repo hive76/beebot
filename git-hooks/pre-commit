@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Block commits that contain secrets. Installed with: git config core.hooksPath git-hooks
+set -euo pipefail
+# Hooks and runuser get a minimal PATH; the pinned gitleaks lives in /usr/local/bin.
+export PATH="$PATH:/usr/local/bin:/opt/homebrew/bin"
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks is not installed; refusing to commit unscanned changes." >&2
+  exit 1
+fi
+
+root=$(git rev-parse --show-toplevel)
+cfg=()
+[ -f "$root/.gitleaks.toml" ] && cfg=(--config "$root/.gitleaks.toml")
+
+if ! gitleaks protect --staged "${cfg[@]}" --no-banner --redact; then
+  echo "pre-commit: possible secret in staged changes. Secrets belong in /etc/hive76/secrets/, never in git." >&2
+  exit 1
+fi
