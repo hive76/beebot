@@ -6,9 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    name: Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,14 +23,13 @@ jobs:
         run: python -m pytest tests/ -v
 
   scan-secrets:
-    name: Secret Scan
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # full history so gitleaks can scan all commits
       - name: Trivy secret scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           scan-type: fs
           scanners: secret
@@ -41,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Trivy CVE scan (warn only)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
         with:
           scan-type: fs
           scanners: vuln

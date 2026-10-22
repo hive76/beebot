@@ -21,3 +21,19 @@ venv/
 # Local knowledge base copy
 knowledge_base.txt
 sync_manifest.json
+
+# Hive76 template (ops/repo-template/.gitignore)
+*.env
+.env*
+!*.env.example
+secrets/
+*.key
+*.pem
+id_*
+!id_*.pub
+*.sql
+*.sql.gz
+*.dump
+*.csv
+.superpowers/
+.pytest_cache/
