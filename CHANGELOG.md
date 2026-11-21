@@ -5,6 +5,15 @@ Follows [Semantic Versioning](https://semver.org/): MAJOR.MINOR.PATCH
 
 ---
 
+## [Unreleased]
+
+### Changed
+- Full answers and new-member welcome messages are now logged (answers were cut at 200 characters; welcomes weren't logged)
+- System prompt edits from `_beebot-prompt` apply from the next message after any sync, including the scheduled one — no restart needed. `/beebot-sync` no longer restarts the bot
+
+### Fixed
+- A `_beebot-prompt` doc containing both `{knowledge_base}` and any other `{...}` text no longer breaks every reply
+
 ## [1.1.0] — 2026-03-22
 
 ### Added
