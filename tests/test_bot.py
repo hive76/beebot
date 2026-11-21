@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import importlib
+from datetime import datetime, timezone
 from collections import defaultdict
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -208,6 +209,27 @@ class TestBuildSystemPrompt:
         assert "{bot_emoji}" not in result
 
 
+class TestCurrentDate:
+    def test_date_line_format(self, monkeypatch):
+        monkeypatch.setattr(beebot, "BOT_TIMEZONE_NAME", "America/New_York")
+        line = beebot.current_date_line(datetime(2026, 11, 21, 15, 4))
+        assert "Today is Saturday, November 21, 2026." in line
+        assert "15:04 (America/New_York)" in line
+
+    def test_date_in_system_prompt_before_footer(self, monkeypatch):
+        monkeypatch.setattr(beebot, "SYSTEM_PROMPT_TEMPLATE", "Prompt.\n\n{knowledge_base}")
+        result = beebot.build_system_prompt("kb")
+        assert "Today is " in result
+        assert result.endswith(beebot._SECURITY_FOOTER)
+
+    def test_unknown_timezone_falls_back_to_utc(self, caplog):
+        assert beebot._load_timezone("Not/AZone") is timezone.utc
+        assert "not a known timezone" in caplog.text
+
+    def test_known_timezone_loads(self):
+        assert str(beebot._load_timezone("America/New_York")) == "America/New_York"
+
+
 # ── check_input_length ────────────────────────────────────────────────────────
 
 class TestCheckInputLength:
@@ -365,6 +387,172 @@ class TestAnswerLogging:
         beebot.handle_new_member(body, say, MagicMock())
         assert "WELCOME-TEXT" in caplog.text
         say.assert_called_once()
+
+
+# ── Thread history (#9) ───────────────────────────────────────────────────────
+
+def _slack_msg(ts, text, user="U_MEMBER", **extra):
+    return {"ts": ts, "text": text, "user": user, **extra}
+
+
+class TestThreadHistory:
+    def _client(self, monkeypatch, messages):
+        client = MagicMock()
+        client.conversations_replies.return_value = {"messages": messages}
+        monkeypatch.setattr(beebot.app, "client", client)
+        monkeypatch.setattr(beebot, "bot_user_id", lambda: "U_BOT")
+        return client
+
+    def test_returns_earlier_messages_with_roles(self, monkeypatch):
+        self._client(monkeypatch, [
+            _slack_msg("100.0", "What are the membership levels?"),
+            _slack_msg("101.0", "Full and Light.", user="U_BOT", bot_id="B_BOT"),
+            _slack_msg("102.0", "what about Light members"),
+        ])
+        history = beebot.fetch_thread_history("C1", "100.0", "102.0")
+        assert [m["text"] for m in history] == ["What are the membership levels?", "Full and Light."]
+        assert [m["bot"] for m in history] == [False, True]
+
+    def test_skips_later_other_bots_and_subtypes(self, monkeypatch):
+        self._client(monkeypatch, [
+            _slack_msg("100.0", "question"),
+            _slack_msg("100.5", "integration post", user="U_OTHERBOT", bot_id="B_OTHER"),
+            _slack_msg("100.7", "joined", subtype="channel_join"),
+            _slack_msg("103.0", "later message"),
+        ])
+        history = beebot.fetch_thread_history("C1", "100.0", "102.0")
+        assert [m["text"] for m in history] == ["question"]
+
+    def test_caps_characters_keeping_most_recent(self, monkeypatch):
+        monkeypatch.setattr(beebot, "THREAD_HISTORY_MAX_CHARS", 10)
+        self._client(monkeypatch, [
+            _slack_msg("100.0", "a" * 8),
+            _slack_msg("101.0", "b" * 8),
+        ])
+        history = beebot.fetch_thread_history("C1", "100.0", "102.0")
+        assert [m["text"] for m in history] == ["b" * 8]
+
+    def test_api_error_returns_empty(self, monkeypatch, caplog):
+        client = self._client(monkeypatch, [])
+        client.conversations_replies.side_effect = beebot.SlackApiError(
+            "no", {"ok": False, "error": "missing_scope"})
+        assert beebot.fetch_thread_history("C1", "100.0", "102.0") == []
+        assert "missing_scope" in caplog.text
+
+    def test_top_level_message_has_no_history(self, monkeypatch):
+        client = self._client(monkeypatch, [])
+        assert beebot.thread_history_for({"channel": "C1", "ts": "100.0"}) == []
+        assert beebot.thread_history_for({"channel": "C1", "ts": "100.0", "thread_ts": "100.0"}) == []
+        client.conversations_replies.assert_not_called()
+
+    def test_history_sent_to_claude(self, monkeypatch):
+        client = MagicMock()
+        client.messages.create.return_value.content = [MagicMock(text="answer")]
+        monkeypatch.setattr(beebot, "anthropic_client", client)
+        monkeypatch.setattr(beebot, "load_knowledge_base", lambda: "kb")
+        history = [{"bot": False, "user": "U_MEMBER", "text": "levels?"},
+                   {"bot": True, "user": "U_BOT", "text": "Full and Light."}]
+        beebot.ask_claude("what about Light", history)
+        content = client.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert content.startswith("<thread_history>")
+        assert "[<@U_MEMBER>]: levels?" in content
+        assert "[BeeBot]: Full and Light." in content
+        assert content.endswith("<user_message>what about Light</user_message>")
+
+    def test_no_history_block_without_history(self, monkeypatch):
+        client = MagicMock()
+        client.messages.create.return_value.content = [MagicMock(text="answer")]
+        monkeypatch.setattr(beebot, "anthropic_client", client)
+        monkeypatch.setattr(beebot, "load_knowledge_base", lambda: "kb")
+        beebot.ask_claude("hello")
+        content = client.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert content == "<user_message>hello</user_message>"
+
+
+# ── Which new-members messages get an answer (#8) ─────────────────────────────
+
+class TestLooksLikeQuestion:
+    @pytest.mark.parametrize("text", [
+        "Where is the laser cutter?",
+        "how do I get a key fob",
+        "Hi all. What time is open house",
+        "anyone know the wifi password",
+        "<@U_OTHER> is the shop open",
+    ])
+    def test_questions(self, text):
+        assert beebot.looks_like_question(text)
+
+    @pytest.mark.parametrize("text", [
+        "thanks!",
+        "Hi everyone, I'm new here",
+        "See you all tonight",
+        "This place is great. Happy to be here",
+    ])
+    def test_not_questions(self, text):
+        assert not beebot.looks_like_question(text)
+
+
+class TestShouldAnswerNewMembersMessage:
+    @pytest.fixture(autouse=True)
+    def _bot(self, monkeypatch):
+        monkeypatch.setattr(beebot, "bot_user_id", lambda: "U_BOT")
+
+    def test_bot_mention_always_answered(self):
+        assert beebot.should_answer_new_members_message("<@U_BOT> hello", True, [])
+
+    def test_addressed_to_someone_else_skipped(self):
+        assert not beebot.should_answer_new_members_message("<@U_OTHER> where are you?", False, [])
+
+    def test_top_level_question_answered(self):
+        assert beebot.should_answer_new_members_message("Where do I park?", False, [])
+
+    def test_top_level_chat_skipped(self):
+        assert not beebot.should_answer_new_members_message("Hello everyone!", False, [])
+
+    def test_thread_question_after_bot_reply_answered(self):
+        history = [{"bot": True, "user": "U_BOT", "text": "Full and Light."}]
+        assert beebot.should_answer_new_members_message("what about Light members", True, history)
+
+    def test_thread_question_between_members_skipped(self):
+        history = [{"bot": False, "user": "U_A", "text": "Going tonight?"}]
+        assert not beebot.should_answer_new_members_message("are you bringing tools?", True, history)
+
+    def test_thanks_in_bot_thread_skipped(self):
+        history = [{"bot": True, "user": "U_BOT", "text": "Full and Light."}]
+        assert not beebot.should_answer_new_members_message("thanks!", True, history)
+
+
+class TestHandleNewMembersMessage:
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        monkeypatch.setattr(beebot, "bot_user_id", lambda: "U_BOT")
+        monkeypatch.setattr(beebot, "is_rate_limited", lambda uid: False)
+        self.ask = MagicMock(return_value="answer")
+        monkeypatch.setattr(beebot, "ask_claude", self.ask)
+        self.say = MagicMock()
+
+    def _event(self, text, **extra):
+        return {"event": {"channel": beebot.NEW_MEMBERS_CHANNEL, "user": "U_MEMBER",
+                          "ts": "200.0", "text": text, **extra}}
+
+    def test_question_answered_in_thread(self):
+        beebot.handle_new_members_message(self._event("Where is the wifi password?"), self.say, MagicMock())
+        self.ask.assert_called_once_with("Where is the wifi password?", [])
+        assert self.say.call_args.kwargs["thread_ts"] == "200.0"
+
+    def test_chat_ignored(self):
+        beebot.handle_new_members_message(self._event("Thanks so much!"), self.say, MagicMock())
+        self.ask.assert_not_called()
+        self.say.assert_not_called()
+
+    def test_bot_mention_stripped_from_question(self):
+        beebot.handle_new_members_message(self._event("<@U_BOT> laser hours"), self.say, MagicMock())
+        self.ask.assert_called_once_with("laser hours", [])
+
+    def test_bare_mention_gets_greeting(self):
+        beebot.handle_new_members_message(self._event("<@U_BOT>"), self.say, MagicMock())
+        self.ask.assert_not_called()
+        assert "Ask me anything" in self.say.call_args.kwargs["text"]
 
 
 # ── load_knowledge_base ───────────────────────────────────────────────────────
@@ -771,16 +959,32 @@ class TestHandleRestartCommand:
         text = self.respond.call_args[0][0]
         assert "permission" in text.lower() or "sorry" in text.lower()
 
-    def test_admin_triggers_sys_exit(self, monkeypatch):
+    def test_admin_exits_whole_process(self, monkeypatch):
         monkeypatch.setattr(beebot, "ADMIN_USER_IDS", {"U_ADMIN"})
-        with pytest.raises(SystemExit) as exc_info:
-            self._call()
-        assert exc_info.value.code == 0
+        exit_process = MagicMock()
+        monkeypatch.setattr(beebot, "_exit_process", exit_process)
+        self._call()
+        exit_process.assert_called_once_with(0)
+
+    def test_non_admin_does_not_exit(self, monkeypatch):
+        monkeypatch.setattr(beebot, "ADMIN_USER_IDS", {"U_ADMIN"})
+        exit_process = MagicMock()
+        monkeypatch.setattr(beebot, "_exit_process", exit_process)
+        self._call(user_id="U_NOBODY")
+        exit_process.assert_not_called()
+
+    def test_exit_process_uses_os_exit(self, monkeypatch):
+        """sys.exit() in a Bolt worker thread would only end that thread."""
+        os_exit = MagicMock()
+        monkeypatch.setattr(beebot.os, "_exit", os_exit)
+        monkeypatch.setattr(beebot.logging, "shutdown", MagicMock())
+        beebot._exit_process(0)
+        os_exit.assert_called_once_with(0)
 
     def test_responds_before_exit(self, monkeypatch):
         monkeypatch.setattr(beebot, "ADMIN_USER_IDS", {"U_ADMIN"})
-        with pytest.raises(SystemExit):
-            self._call()
+        monkeypatch.setattr(beebot, "_exit_process", MagicMock())
+        self._call()
         self.ack.assert_called_once()
         self.respond.assert_called_once()
         response = self.respond.call_args[0][0]

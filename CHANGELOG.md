@@ -7,11 +7,17 @@ Follows [Semantic Versioning](https://semver.org/): MAJOR.MINOR.PATCH
 
 ## [Unreleased]
 
+### Added
+- BeeBot knows today's date and local time (`BOT_TIMEZONE`, default UTC) (#10)
+- Replies in a thread include the earlier messages of that thread, so follow-up questions work (#9)
+
 ### Changed
+- In the new-members channel BeeBot answers only questions and @BeeBot mentions — not thanks, chat between members, or messages addressed to someone else; in a thread, only once it has replied there (#8)
 - Full answers and new-member welcome messages are now logged (answers were cut at 200 characters; welcomes weren't logged)
 - System prompt edits from `_beebot-prompt` apply from the next message after any sync, including the scheduled one — no restart needed. `/beebot-sync` no longer restarts the bot
 
 ### Fixed
+- `/beebot-restart` now actually restarts the bot (sys.exit() in a Slack handler only ended a worker thread)
 - A `_beebot-prompt` doc containing both `{knowledge_base}` and any other `{...}` text no longer breaks every reply
 
 ## [1.1.0] — 2026-03-22
