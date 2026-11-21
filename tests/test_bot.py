@@ -177,6 +177,12 @@ class TestBuildSystemPrompt:
         result = beebot.build_system_prompt("KB content")
         assert "KB content" in result
 
+    def test_other_braces_do_not_break_placeholder(self, monkeypatch):
+        monkeypatch.setattr(beebot, "SYSTEM_PROMPT_TEMPLATE", "Sign off with {emoji} {name}.\n\n{knowledge_base}")
+        result = beebot.build_system_prompt("KB content")
+        assert "KB content" in result
+        assert "{emoji} {name}" in result
+
     def test_appends_kb_when_placeholder_missing(self, monkeypatch, caplog):
         monkeypatch.setattr(beebot, "SYSTEM_PROMPT_TEMPLATE", "Prompt with no placeholder.")
         result = beebot.build_system_prompt("KB content")
@@ -286,6 +292,79 @@ class TestLoadSystemPrompt:
         monkeypatch.setattr(beebot, "SYSTEM_PROMPT_PATH", str(prompt_file))
         result = beebot.load_system_prompt()
         assert result == beebot._DEFAULT_SYSTEM_PROMPT
+
+
+# ── reload_system_prompt_if_changed ───────────────────────────────────────────
+
+class TestReloadSystemPrompt:
+    def test_reloads_when_file_changes(self, tmp_path, monkeypatch):
+        prompt_file = tmp_path / "system_prompt.txt"
+        prompt_file.write_text("Old prompt.")
+        monkeypatch.setattr(beebot, "SYSTEM_PROMPT_PATH", str(prompt_file))
+        monkeypatch.setattr(beebot, "SYSTEM_PROMPT_TEMPLATE", "Old prompt.")
+        monkeypatch.setattr(beebot, "_loaded_prompt_mtime", prompt_file.stat().st_mtime)
+        prompt_file.write_text("New prompt from Drive.")
+        os.utime(prompt_file, (time.time() + 10, time.time() + 10))
+        beebot.reload_system_prompt_if_changed()
+        assert beebot.SYSTEM_PROMPT_TEMPLATE == "New prompt from Drive."
+
+    def test_keeps_prompt_when_file_unchanged(self, tmp_path, monkeypatch):
+        prompt_file = tmp_path / "system_prompt.txt"
+        prompt_file.write_text("On disk.")
+        monkeypatch.setattr(beebot, "SYSTEM_PROMPT_PATH", str(prompt_file))
+        monkeypatch.setattr(beebot, "SYSTEM_PROMPT_TEMPLATE", "In memory.")
+        monkeypatch.setattr(beebot, "_loaded_prompt_mtime", prompt_file.stat().st_mtime)
+        beebot.reload_system_prompt_if_changed()
+        assert beebot.SYSTEM_PROMPT_TEMPLATE == "In memory."
+
+    def test_keeps_prompt_when_file_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(beebot, "SYSTEM_PROMPT_PATH", str(tmp_path / "nonexistent.txt"))
+        monkeypatch.setattr(beebot, "SYSTEM_PROMPT_TEMPLATE", "In memory.")
+        monkeypatch.setattr(beebot, "_loaded_prompt_mtime", 123.0)
+        beebot.reload_system_prompt_if_changed()
+        assert beebot.SYSTEM_PROMPT_TEMPLATE == "In memory."
+
+    def test_build_system_prompt_uses_reloaded_prompt(self, tmp_path, monkeypatch):
+        prompt_file = tmp_path / "system_prompt.txt"
+        prompt_file.write_text("Fresh rules.")
+        monkeypatch.setattr(beebot, "SYSTEM_PROMPT_PATH", str(prompt_file))
+        monkeypatch.setattr(beebot, "SYSTEM_PROMPT_TEMPLATE", "Stale rules.")
+        monkeypatch.setattr(beebot, "_loaded_prompt_mtime", None)
+        result = beebot.build_system_prompt("kb")
+        assert "Fresh rules." in result
+        assert "Stale rules." not in result
+
+
+# ── Logging of answers and welcomes ───────────────────────────────────────────
+
+class TestAnswerLogging:
+    def _fake_response(self, text):
+        response = MagicMock()
+        response.content = [MagicMock(text=text)]
+        return response
+
+    def test_ask_claude_logs_full_answer(self, monkeypatch, caplog):
+        answer = "x" * 300 + " END-OF-ANSWER"
+        client = MagicMock()
+        client.messages.create.return_value = self._fake_response(answer)
+        monkeypatch.setattr(beebot, "anthropic_client", client)
+        monkeypatch.setattr(beebot, "load_knowledge_base", lambda: "kb")
+        caplog.set_level("INFO")
+        assert beebot.ask_claude("question") == answer
+        assert "END-OF-ANSWER" in caplog.text
+
+    def test_welcome_message_is_logged(self, monkeypatch, caplog):
+        client = MagicMock()
+        client.messages.create.return_value = self._fake_response("Welcome aboard! WELCOME-TEXT")
+        monkeypatch.setattr(beebot, "anthropic_client", client)
+        monkeypatch.setattr(beebot, "load_knowledge_base", lambda: "kb")
+        monkeypatch.setattr(beebot, "bot_user_id", lambda: "U_BOT")
+        caplog.set_level("INFO")
+        say = MagicMock()
+        body = {"event": {"channel": beebot.NEW_MEMBERS_CHANNEL, "user": "U_NEW"}}
+        beebot.handle_new_member(body, say, MagicMock())
+        assert "WELCOME-TEXT" in caplog.text
+        say.assert_called_once()
 
 
 # ── load_knowledge_base ───────────────────────────────────────────────────────

@@ -294,7 +294,28 @@ def load_system_prompt() -> str:
     return _DEFAULT_SYSTEM_PROMPT
 
 
+def _system_prompt_mtime() -> float | None:
+    try:
+        return Path(SYSTEM_PROMPT_PATH).stat().st_mtime
+    except OSError:
+        return None
+
+
 SYSTEM_PROMPT_TEMPLATE = load_system_prompt()
+_loaded_prompt_mtime = _system_prompt_mtime()
+
+
+def reload_system_prompt_if_changed():
+    """Reload the system prompt when sync_docs has rewritten the file since it was loaded.
+
+    Lets the nightly sync (a separate container) apply prompt edits without a restart.
+    """
+    global SYSTEM_PROMPT_TEMPLATE, _loaded_prompt_mtime
+    mtime = _system_prompt_mtime()
+    if mtime is None or mtime == _loaded_prompt_mtime:
+        return
+    SYSTEM_PROMPT_TEMPLATE = load_system_prompt()
+    _loaded_prompt_mtime = mtime
 
 # ── State ─────────────────────────────────────────────────────────────────────
 
@@ -319,11 +340,13 @@ def build_system_prompt(kb: str) -> str:
 
     The security footer is always appended — admins cannot remove it via Drive.
     """
+    reload_system_prompt_if_changed()
     template = SYSTEM_PROMPT_TEMPLATE
     if "{bot_emoji}" in template:
         template = template.replace("{bot_emoji}", BOT_EMOJI)
     if "{knowledge_base}" in template:
-        result = template.format(knowledge_base=kb)
+        # replace(), not format(): other {braces} typed into the Drive doc must not crash the bot
+        result = template.replace("{knowledge_base}", kb)
     else:
         log.warning("System prompt missing {knowledge_base} placeholder — appending KB automatically")
         result = f"{template}\n\n<knowledge_base>\n{kb}\n</knowledge_base>"
@@ -364,7 +387,7 @@ def ask_claude(question: str) -> str:
             messages=[{"role": "user", "content": f"<user_message>{question}</user_message>"}],
         )
         answer = response.content[0].text
-        log.info("Response (%d chars): %s", len(answer), answer[:200])
+        log.info("Response (%d chars): %s", len(answer), answer)
         return answer
     except anthropic.APIError as e:
         log.error("Anthropic API error: %s", e)
@@ -514,6 +537,7 @@ def handle_new_member(body, say, logger):
         log.error("Anthropic API error on welcome: %s", e)
         welcome_text = f"Welcome! {BOT_EMOJI} <@{user_id}> — feel free to ask me anything."
 
+    log.info("Welcome for %s (%d chars): %s", user_id, len(welcome_text), welcome_text)
     say(text=welcome_text, channel=NEW_MEMBERS_CHANNEL)
 
 
@@ -615,10 +639,9 @@ def handle_sync_command(ack, respond, command):
         safe_output = "\n".join(safe_lines[-40:])
         if result.returncode == 0:
             respond(f"✅ Knowledge base updated.\n```{safe_output}```")
-            # System prompt loads once at startup — restart if sync_docs reports it changed
+            # build_system_prompt reloads the changed file on the next message — no restart needed
             if "System prompt UPDATED" in output:
-                respond(f"{BOT_EMOJI} System prompt changed — restarting to apply it...")
-                sys.exit(0)
+                respond(f"{BOT_EMOJI} System prompt changed — it applies from the next message.")
         else:
             respond(f"❌ Sync failed.\n```{safe_output}```")
     except Exception as e:

@@ -66,9 +66,9 @@ BeeBot's personality, tone, and rules are defined in a special Google Doc called
 To update BeeBot's behavior:
 1. Open the `_beebot-prompt` doc in this folder
 2. Edit the instructions (tone, rules, what to do/not do)
-3. Run `/beebot-sync` in Slack — changes take effect immediately after sync
+3. Wait for the 3am sync, or run `/beebot-sync` in Slack — BeeBot uses the new instructions from the next message after the sync, no restart needed
 
-The `{knowledge_base}` placeholder in that doc must stay exactly as-is — BeeBot replaces it with the synced content at runtime.
+If the doc contains a `{knowledge_base}` placeholder, BeeBot inserts the synced content there; otherwise it adds it at the end. `{bot_emoji}` is replaced with the bot's emoji.
 
 ---
 
