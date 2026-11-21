@@ -54,7 +54,8 @@ The service account can now read all docs in that folder and subfolders.
 ### Bot Token Scopes
 - Features → OAuth & Permissions → Bot Token Scopes → Add:
   - `app_mentions:read`
-  - `channels:history`
+  - `channels:history` (also lets BeeBot read earlier messages in a thread)
+  - `groups:history` (optional — thread context for @BeeBot in private channels)
   - `chat:write`
   - `commands`
   - `users:read`
@@ -196,6 +197,9 @@ Gracefully exits the bot process — Docker's restart policy brings it back with
 - Check `docker logs beebot` for errors
 - Verify `NEW_MEMBERS_CHANNEL_ID` matches the actual channel ID (not name)
 - Confirm BeeBot is invited to the channel (`/invite @BeeBot`)
+- BeeBot only answers messages that look like questions (a `?`, or a sentence starting
+  with a word like *how*, *where*, *can*), or that @mention it. Messages that @mention
+  someone else, and thread replies in threads BeeBot hasn't answered in, are skipped
 
 **Sync failing**
 - Check service account JSON is at `config/service-account.json`
@@ -242,7 +246,7 @@ Google Drive (HiveBot Docs folder)
         └── sync_docs.py (daily cron + /beebot-sync)
               └── /app/data/knowledge_base.txt (Docker volume)
                     └── beebot.py (Slack Bolt, Socket Mode)
-                          ├── #new-members: all messages
+                          ├── #new-members: questions and @BeeBot mentions
                           ├── anywhere: @BeeBot mentions
                           └── Anthropic API (claude-haiku-4-5)
 

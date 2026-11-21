@@ -127,6 +127,7 @@ To have an event show up: just publish it on Eventbrite as normal. It will sync 
 ## Troubleshooting
 
 ### BeeBot isn't responding in #new-members
+- BeeBot only answers questions (a message with a `?`, or that starts with a word like *how*, *where* or *can*) and messages that @mention it. It stays out of chat between members: thanks, hellos, and messages that @mention someone else. In a thread, it only answers if it has already replied there — or if you @mention it
 - Make sure BeeBot is invited to the channel: `/invite @BeeBot`
 - Check if the bot is running: ask the CTO to check `docker logs beebot`
 
@@ -149,6 +150,11 @@ To have an event show up: just publish it on Eventbrite as normal. It will sync 
 - Run `/beebot-sync` to force a refresh
 
 ---
+
+## What BeeBot Knows About a Conversation
+
+- **Today's date and time** — so it can tell which events are coming up
+- **Earlier messages in the same thread** — so follow-ups like "what about Light members?" work. It does not see other threads or the rest of the channel
 
 ## Things BeeBot Will NOT Do
 
